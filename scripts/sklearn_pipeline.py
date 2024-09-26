@@ -1,73 +1,67 @@
-import os
+import numpy as np
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.impute import SimpleImputer
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.pipeline import Pipeline
-from datetime import datetime
+import datetime
 
+class KerasRegressor(BaseEstimator, RegressorMixin):
+    def __init__(self, input_shape, epochs=30, batch_size=2):
+        self.input_shape = input_shape
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.model = None
 
-def preprocess_data(train_df, store_df, output_folder_path):
-    """
-    Preprocess the input DataFrames by handling the 'PromoInterval' column and merging the data. Split the data into training and validation sets, and save the results as Parquet files.
-    
-    Args:
-        train_df (pandas.DataFrame): The training DataFrame.
-        store_df (pandas.DataFrame): The store information DataFrame.
-        output_folder_path (str): The path to the folder where the preprocessed data will be saved.
-        
-    Returns:
-        pandas.DataFrame: The preprocessed training DataFrame.
-        pandas.DataFrame: The unsplit preprocessed DataFrame.
-    """
-    # Merge the train and store DataFrames
-    merged_df = train_df.merge(store_df, how="left", on="Store")
-    
-    # Encoding the 'PromoInterval' column
-    promo_interval_mapping = {'Jan,Apr,Jul,Oct': 0, 'Feb,May,Aug,Nov': 1, 'Mar,Jun,Sept,Dec': 2}
-    merged_df['PromoInterval'] = merged_df['PromoInterval'].map(promo_interval_mapping).fillna(-1).astype(int)
-    
-    # Handling missing values in the 'PromoInterval' column
-    promo_interval_imputer = SimpleImputer(strategy='most_frequent')
-    merged_df['PromoInterval'] = promo_interval_imputer.fit_transform(merged_df[['PromoInterval']])
+    def fit(self, X, y):
+        self.model = Sequential()
+        self.model.add(LSTM(32, input_shape=self.input_shape))  
+        self.model.add(Dense(1))  
+        self.model.compile(loss='mse', optimizer='adam') 
+        self.model.fit(X, y, epochs=self.epochs, batch_size=self.batch_size, verbose=0)
+        return self
 
-    # Handle missing values for other columns
-    competition_distance_imputer = SimpleImputer(strategy='mean')
-    competition_open_since_imputer = SimpleImputer(strategy='median')
-    promo2_since_imputer = SimpleImputer(strategy='mean')
+    def predict(self, X):
+        return self.model.predict(X)
 
-    competition_distance_pipeline = Pipeline([('imputer', competition_distance_imputer)])
-    competition_open_since_pipeline = Pipeline([('imputer', competition_open_since_imputer)])
-    promo2_since_pipeline = Pipeline([('imputer', promo2_since_imputer)])
+    def save_model(self, filename):
+        self.model.save(filename)
 
-    merged_df['CompetitionDistance'] = competition_distance_pipeline.fit_transform(merged_df[['CompetitionDistance']])
-    merged_df[['CompetitionOpenSinceYear', 'CompetitionOpenSinceMonth']] = competition_open_since_pipeline.fit_transform(merged_df[['CompetitionOpenSinceYear', 'CompetitionOpenSinceMonth']])
-    merged_df[['Promo2SinceYear', 'Promo2SinceWeek']] = promo2_since_pipeline.fit_transform(merged_df[['Promo2SinceYear', 'Promo2SinceWeek']])
+# Convert df_series to a NumPy array
+df_series_array = df_series.values  
 
-    # Data type conversion
-    merged_df['Date'] = pd.to_datetime(merged_df['Date'])
-    merged_df['Open'] = merged_df['Open'].astype(bool)
-    merged_df['StateHoliday'] = merged_df['StateHoliday'].map({'0': 0, 'a': 1, 'b': 2, 'c': 3}).fillna(-1).astype(int)
-    merged_df['SchoolHoliday'] = merged_df['SchoolHoliday'].astype(bool)
-    merged_df['StoreType'] = merged_df['StoreType'].map({'a': 0, 'b': 1, 'c': 2, 'd': 3}).fillna(-1).astype(int)
-    merged_df['Assortment'] = merged_df['Assortment'].map({'a': 0, 'b': 1, 'c': 2}).fillna(-1).astype(int)
-    merged_df['Promo2'] = merged_df['Promo2'].astype(bool)
+# Extract features and target variable from the NumPy array
+X = df_series_array[:, :-1] 
+y = df_series_array[:, -1]
 
-    # Split the data into training and validation sets
-    X = merged_df.drop('Sales', axis=1)
-    y = merged_df['Sales']
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+# Create lagged target variable (adjust as needed)
+y_shifted = np.roll(y, -6)  
+y_shifted[-6:] = np.nan     
+valid_indices = ~np.isnan(y_shifted)
+X = X[valid_indices]
+y = y_shifted[valid_indices]
 
-    # Combine the features and target variable back into dataframes
-    df_train = pd.concat([X_train, y_train], axis=1)
-    df_val = pd.concat([X_val, y_val], axis=1)
+# Reshape input
+X = X.reshape(X.shape[0], 1, -1)
 
-    # Save the training and validation sets to separate Parquet files
-    current_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    train_output_file = os.path.join(output_folder_path, f'preprocessed_train_{current_timestamp}.parquet')
-    val_output_file = os.path.join(output_folder_path, f'preprocessed_validation_{current_timestamp}.parquet')
-    merged_output_file = os.path.join(output_folder_path, f'preprocessed_merged_{current_timestamp}.parquet')
-    merged_df.to_parquet(merged_output_file, index=False)
-    df_train.to_parquet(train_output_file, index=False)
-    df_val.to_parquet(val_output_file, index=False)
+# Split the data
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False) 
 
-    return df_train, df_val, merged_df
+# Create the KerasRegressor estimator
+estimator = KerasRegressor(input_shape=(X_train.shape[1], X_train.shape[2]))
+
+# Create a pipeline (you can add other steps here if needed)
+pipeline = Pipeline([
+    ('estimator', estimator)
+])
+
+# Fit the pipeline (this will train the Keras model)
+pipeline.fit(X_train, y_train) 
+
+# Get current timestamp and save the model
+timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+model_filename = f'rossman_model_{timestamp}.h5'
+pipeline['estimator'].save_model(model_filename)  # Access the estimator within the pipeline
+
+print(f"Model saved as: {model_filename}")
